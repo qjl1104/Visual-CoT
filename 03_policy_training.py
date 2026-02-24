@@ -1,191 +1,137 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-import torchvision.models as models
+from torch.utils.data import Dataset, DataLoader, Subset
+from torchvision import transforms, models
+from torchvision.models import ResNet18_Weights
 from PIL import Image
 import json
 import os
 import numpy as np
 
-# --- 1. 定义真实的多模态数据集 ---
 class VisualCotDataset(Dataset):
-    def __init__(self, json_path, transform=None):
-        """
-        Args:
-            json_path: 包含标注数据的 json 文件路径
-            transform: 图像预处理管线
-        """
+    def __init__(self, json_path, stack_size=3, chunk_size=20):
         with open(json_path, 'r', encoding='utf-8') as f:
             self.data = json.load(f)
+            
+        self.stack_size = stack_size
+        self.chunk_size = chunk_size
         
-        self.transform = transform
+        # 【工业级优化 1】：动作归一化 (Action Normalization)
+        # 统计数据集中所有动作的极值，将其映射到 [-1, 1] 之间，防止大数值关节主导 Loss
+        all_actions = np.array([item['action'] for item in self.data])
+        self.action_min = torch.tensor(all_actions.min(axis=0), dtype=torch.float32)
+        self.action_max = torch.tensor(all_actions.max(axis=0), dtype=torch.float32)
+        self.action_scale = self.action_max - self.action_min
+        self.action_scale[self.action_scale == 0] = 1.0 # 防止除零
         
-        # 如果没有传入 transform，使用 ImageNet 标准预处理
-        if self.transform is None:
-            self.transform = transforms.Compose([
-                transforms.Resize((224, 224)), # ResNet 输入尺寸
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                                     std=[0.229, 0.224, 0.225])
-            ])
-
-        # 意图标签映射
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
         self.intent_map = {"APPROACH": 0, "GRASP": 1, "LIFT": 2, "PLACE": 3}
+
+    def normalize_action(self, act):
+        act_tensor = torch.tensor(act, dtype=torch.float32)
+        return (act_tensor - self.action_min) / self.action_scale * 2.0 - 1.0
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
+        # --- 获取历史图像 (Frame Stacking) ---
+        frames = []
+        for i in range(idx - self.stack_size + 1, idx + 1):
+            curr_idx = max(0, i)
+            img_path = self.data[curr_idx]['image_path']
+            img = Image.open(img_path).convert('RGB') if os.path.exists(img_path) else Image.new('RGB', (224, 224))
+            frames.append(self.transform(img))
+        stacked_imgs = torch.cat(frames, dim=0)
+        
         item = self.data[idx]
-        
-        # --- A. 加载图像 (Visual Input) ---
-        img_path = item['image_path']
-        # 鲁棒性处理：如果图片不存在（比如在测试环境），生成黑图
-        if os.path.exists(img_path):
-            image = Image.open(img_path).convert('RGB')
-        else:
-            image = Image.new('RGB', (224, 224), color='black')
-            
-        if self.transform:
-            image = self.transform(image)
-            
-        # --- B. 加载本体感知 (Proprioception Input) ---
         state = torch.tensor(item['state'], dtype=torch.float32)
+        intent = torch.tensor(self.intent_map.get(item.get('intent', 'APPROACH'), 0), dtype=torch.long)
         
-        # --- C. 加载 Ground Truth ---
-        action = torch.tensor(item['action'], dtype=torch.float32)
+        # --- 【工业级优化 2】：轨迹越界保护 (Episode Boundary Padding) ---
+        action_chunk = []
+        # 假设数据中有 episode_id 字段。如果没有，默认为 0 (针对单轨迹 Demo)
+        current_episode = item.get('episode_id', 0) 
+        last_valid_act = self.normalize_action(item['action'])
         
-        intent_str = item.get('intent', "APPROACH")
-        # 处理可能出现的未定义标签
-        intent_label = self.intent_map.get(intent_str.split()[0], 0) 
-        intent_target = torch.tensor(intent_label, dtype=torch.long)
-        
-        return image, state, action, intent_target
+        for i in range(idx, idx + self.chunk_size):
+            if i < len(self.data):
+                next_ep = self.data[i].get('episode_id', 0)
+                if next_ep == current_episode:
+                    # 同一条轨迹，正常读取
+                    act = self.normalize_action(self.data[i]['action'])
+                    last_valid_act = act
+                else:
+                    # 跨越了轨迹边界，停止读取未来动作，用最后一个有效动作 Padding
+                    act = last_valid_act
+            else:
+                # 超出数据集总长度
+                act = last_valid_act
+                
+            action_chunk.append(act)
+            
+        action_seq = torch.stack(action_chunk) # [chunk_size, action_dim]
+        return stacked_imgs, state, action_seq, intent
 
-# --- 2. 真实的视觉-本体融合策略网络 ---
 class VisualCotPolicy(nn.Module):
-    def __init__(self, state_dim=36, action_dim=8, num_intents=4, pretrained=True):
-        super(VisualCotPolicy, self).__init__()
+    # 网络结构与上一版相同，保留修改过的 ResNet (9通道输入) 和 Chunking 输出头
+    def __init__(self, state_dim=36, action_dim=8, stack_size=3, chunk_size=20):
+        super().__init__()
+        self.chunk_size = chunk_size
+        self.action_dim = action_dim
         
-        print(f"Initializing Visual-CoT Policy with ResNet18 Backbone (Pretrained={pretrained})...")
-        
-        # --- 视觉流 (Visual Stream) ---
-        # 使用 ResNet18 提取图像特征
-        resnet = models.resnet18(pretrained=pretrained)
-        # 去掉最后的全连接层 (fc)，只保留卷积特征
+        weights = ResNet18_Weights.IMAGENET1K_V1
+        resnet = models.resnet18(weights=weights)
         self.visual_backbone = nn.Sequential(*list(resnet.children())[:-1])
-        # ResNet18 的输出特征维度是 512
-        self.visual_dim = 512
         
-        # --- 状态流 (Proprioception Stream) ---
-        # 将低维状态映射到高维空间
-        self.state_encoder = nn.Sequential(
-            nn.Linear(state_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64)
-        )
+        self.visual_backbone[0] = nn.Conv2d(3 * stack_size, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.state_encoder = nn.Sequential(nn.Linear(state_dim, 256), nn.ReLU(), nn.Linear(256, 128))
+        self.fusion_mlp = nn.Sequential(nn.Linear(512 + 128, 512), nn.ReLU(), nn.Dropout(0.2), nn.Linear(512, 256), nn.ReLU())
         
-        # --- 多模态融合 (Fusion Module) ---
-        # 拼接 视觉特征 (512) + 状态特征 (64)
-        self.fusion_dim = self.visual_dim + 64
-        self.fusion_mlp = nn.Sequential(
-            nn.Linear(self.fusion_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(0.1), # 防止过拟合
-            nn.Linear(256, 128),
-            nn.ReLU()
-        )
-        
-        # --- 多任务头 (Heads) ---
-        # 1. 动作回归头
-        self.action_head = nn.Linear(128, action_dim)
-        # 2. 意图分类头 (CoT Auxiliary Task)
-        self.intent_head = nn.Linear(128, num_intents)
+        self.action_head = nn.Linear(256, action_dim * chunk_size)
+        self.intent_head = nn.Linear(256, 4)
 
     def forward(self, img, state):
-        # 1. 处理图像: [B, 3, 224, 224] -> [B, 512, 1, 1] -> [B, 512]
-        vis_feat = self.visual_backbone(img)
-        vis_feat = torch.flatten(vis_feat, 1)
-        
-        # 2. 处理状态: [B, 36] -> [B, 64]
+        vis_feat = torch.flatten(self.visual_backbone(img), 1)
         state_feat = self.state_encoder(state)
+        emb = self.fusion_mlp(torch.cat([vis_feat, state_feat], dim=1))
         
-        # 3. 融合: [B, 576]
-        fused = torch.cat([vis_feat, state_feat], dim=1)
-        embedding = self.fusion_mlp(fused)
-        
-        # 4. 预测
-        pred_action = self.action_head(embedding)
-        pred_intent = self.intent_head(embedding)
-        
-        return pred_action, pred_intent
+        pred_actions = self.action_head(emb).view(-1, self.chunk_size, self.action_dim)
+        pred_intent = self.intent_head(emb)
+        return pred_actions, pred_intent
 
-# --- 3. 训练主循环 ---
 def train():
-    # 检查 GPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f">>> Training on device: {device}")
+    dataset = VisualCotDataset("dataset_with_cot.json", stack_size=3, chunk_size=20)
     
-    # 初始化数据集和加载器
-    # 真实训练时，num_workers 可以设置得更高 (例如 4 或 8)
-    try:
-        dataset = VisualCotDataset("dataset_with_cot.json")
-        dataloader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=0)
-    except FileNotFoundError:
-        print("错误：未找到 'dataset_with_cot.json'。请先运行 02_generate_cot.py")
-        return
+    # 保存归一化参数供推理时使用
+    torch.save({'action_min': dataset.action_min, 'action_scale': dataset.action_scale}, 'norm_stats.pth')
+    
+    train_size = int(0.8 * len(dataset))
+    train_idx, val_idx = torch.utils.data.random_split(range(len(dataset)), [train_size, len(dataset) - train_size])
+    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=16, shuffle=True)
+    val_loader = DataLoader(Subset(dataset, val_idx), batch_size=16)
 
-    # 初始化模型
-    model = VisualCotPolicy(pretrained=True).to(device)
-    
-    # 优化器
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
-    
-    # 损失函数
-    mse_loss = nn.MSELoss()
-    ce_loss = nn.CrossEntropyLoss()
-    
-    print(f">>> Start Training (Batches: {len(dataloader)})...")
-    
-    epochs = 10 # 演示用，实际建议 50+
-    for epoch in range(epochs):
+    model = VisualCotPolicy(stack_size=3, chunk_size=20).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    criterion_act = nn.MSELoss()
+    criterion_int = nn.CrossEntropyLoss()
+
+    for epoch in range(10):
         model.train()
-        total_loss = 0
-        
-        for batch_idx, (imgs, states, actions, intents) in enumerate(dataloader):
-            # 搬运数据到 GPU
-            imgs, states = imgs.to(device), states.to(device)
-            actions, intents = actions.to(device), intents.to(device)
-            
-            # 前向传播
+        for batch_i, (imgs, states, action_chunks, intents) in enumerate(train_loader):
+            imgs, states, action_chunks, intents = imgs.to(device), states.to(device), action_chunks.to(device), intents.to(device)
             pred_actions, pred_intents = model(imgs, states)
-            
-            # 计算损失
-            loss_action = mse_loss(pred_actions, actions)
-            loss_intent = ce_loss(pred_intents, intents)
-            
-            # 联合损失: Action为主，Intent为辅
-            loss = loss_action + 0.1 * loss_intent
-            
-            # 反向传播
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch+1} [{batch_idx}/{len(dataloader)}] "
-                      f"Loss: {loss.item():.4f} (Act: {loss_action.item():.3f}, Int: {loss_intent.item():.3f})")
+            loss = criterion_act(pred_actions, action_chunks) + 0.1 * criterion_int(pred_intents, intents)
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
         
-        avg_loss = total_loss / len(dataloader)
-        print(f"=== Epoch {epoch+1} Average Loss: {avg_loss:.4f} ===")
-
-    # 保存权重
-    torch.save(model.state_dict(), "visual_cot_policy.pth")
-    print("\n[Done] Model saved to visual_cot_policy.pth")
+        print(f"Epoch {epoch+1} finished.")
+    torch.save(model.state_dict(), "visual_cot_policy_chunked.pth")
 
 if __name__ == "__main__":
     train()
