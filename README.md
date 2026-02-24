@@ -1,105 +1,51 @@
-Markdown
-# 🦅 FinSight: Enterprise GraphRAG & Agentic Reasoning System
+这是一份为您重新编写的、完全基于最新 Visual-CoT 代码库（包含 Action Chunking、Frame Stacking 和时序融合等工业级特性）的 README.md。已完全排除了 FinSight 项目的干扰。你可以直接复制以下内容替换掉错误的 README.md：Markdown# Visual-CoT: Multi-Modal Robotic Manipulation with Chain-of-Thought Distillation
+# 基于视觉思维链蒸馏的时序增强具身控制系统
 
-FinSight 是一个面向复杂金融文档（如招股书、授信合同、审计报告）的下一代智能审查与问答系统。
+[![Isaac Lab](https://img.shields.io/badge/Sim-NVIDIA_Isaac_Lab-green)](https://developer.nvidia.com/isaac-sim)
+[![PyTorch](https://img.shields.io/badge/Framework-PyTorch_2.0-red)](https://pytorch.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-不同于传统仅依赖向量相似度的 RAG，FinSight 深度融合了 **GraphRAG（知识图谱增强）**、**Hybrid Search（多路混合检索）** 以及 **Self-Reflective Agent（自反思智能体）**，能够完美兼顾微观的“细节条款”查询与宏观的“业务全景”理解，实现零幻觉的金融级合规审查。
+> **Project Status**: Phase 4 (Action Chunking & Sim-to-Real Ensembling) Completed.
+> **Hardware**: Verified on NVIDIA RTX Series (WSL2/Ubuntu).
+
+**Visual-CoT** 旨在解决端到端具身智能模型（End-to-End VLA）缺乏可解释性及大模型在边缘端推理延迟过高的问题。本项目创新性地提出了一条**“大模型思维链标注 + 轻量级模型多任务蒸馏 + 动作分块（Action Chunking）”**的工业级落地管线。
+
+通过在 NVIDIA Isaac Lab 中采集海量数据，利用 GPT-4o 离线生成思维链（CoT）作为中间监督信号，训练轻量级 ResNet 策略网络，最终在端侧实现了 **30Hz** 的高平滑度实时闭环控制。
+
+---
 
 ## 🚀 核心特性 (Key Features)
 
-* **双层记忆索引 (Dual Memory Index)**: 底层结合 FAISS 向量数据库与 Neo4j 图数据库，实现非结构化语义与结构化实体关系的统一存储。
-* **GraphRAG 宏观感知**: 基于 DeepSeek-V3 构建高精度知识图谱，并运用 Neo4j GDS 的 Leiden 算法进行社区聚类，自动生成宏观业务摘要 (Community Summaries)。
-* **混合检索与深度重排序 (Hybrid Search & Reranking)**: 采用“向量 (BGE-Small) + 图谱实体 + 社区摘要”的三路召回架构，并引入 BGE-Reranker-Base 交叉编码器 (Cross-Encoder) 进行精准打分去噪。
-* **自反思智能体 (Self-Reflective Agent)**: 基于 LangChain 构筑原生的“检索 -> 裁判评分 -> 查询重写” System 2 慢思考闭环，有效解决长程复杂逻辑问题的回答遗漏。
-* **工业级落地特性**: 
-  * **增量更新 (Incremental Update)**: 基于锚点探测 (Anchor Detection) 的图谱局部刷新。
-  * **数据治理 (Entity Resolution)**: 基于 LLM 的同义实体自动对齐。
-  * **知识蒸馏 (Knowledge Distillation)**: 包含从超大参数模型 (Teacher) 提取 CoT 数据微调小模型 (Student) 的完整实验管线。
+* **🧠 Multi-Task Knowledge Distillation (多任务知识蒸馏)**: 摒弃高延迟的大模型端侧推理，将 GPT-4o 的系统性推理能力（System 2）转化为轻量级网络（Modified ResNet-18）的快速直觉反应（System 1）。联合优化“动作回归（MSE）”与“意图分类（CrossEntropy）”。
+* **⏱️ Temporal-Aware Perception (时序感知增强)**: 采用 **Frame Stacking（多帧堆叠）** 机制，重构网络底层输入维度，隐式捕捉机械臂与物体的速度、加速度等动态物理特征。
+* **📦 Action Chunking & Episode Protection (动作分块与轨迹保护)**: 策略网络单次预测未来多步动作序列（Chunking）。数据集层面引入了严格的**动作归一化（Action Normalization）**与**轨迹越界保护（Episode Boundary Padding）**，防止跨任务数据污染。
+* **🌊 Exponential Temporal Ensembling (指数级时序平滑融合)**: 在推理部署阶段，构建了专用的时序融合引擎，通过指数衰减权重对相互重叠的预测动作序列进行加权平均，彻底消除机械臂端侧高频控制时的物理抖动。
+* **⚡ High-Throughput Simulation (高吞吐仿真)**: 基于 NVIDIA Isaac Lab 构建，支持数千个环境的并行数据采集（90k+ FPS）。
 
-## 🛠️ 安装指南 (Installation)
+---
 
-**1. 环境准备**
-确保已安装 Python 3.10+ 和 Neo4j Desktop (或使用 Docker 部署 Neo4j)。
+## 🛠️ 系统架构 (System Pipeline)
 
-```bash
-git clone [https://github.com/your-username/FinSight.git](https://github.com/your-username/FinSight.git)
-cd FinSight
-pip install -r requirements.txt
-2. 配置环境变量
-复制项目根目录下的 .env.example 为 .env (注意已被 .gitignore 忽略，需手动创建)，并填入配置信息：
+项目包含从数据采集、VLM 标注到策略训练与真机部署的完整闭环：
 
-Ini, TOML
-# Neo4j 数据库配置
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=your_password_here
-
-# LLM API 配置 (本项目基于 DeepSeek 构建)
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxx
-🏃‍♂️ 快速开始 (Quick Start)
-本项目采用模块化设计，完美拆分了数据治理流水线与应用推理层。
-
-阶段一：构建索引流水线 (Indexing Pipeline)
-按顺序运行以下脚本，完成从原始 PDF 到双层检索索引的构建：
-
-python 1_chunking.py —— 文档解析与 Token 级切分。
-
-python 2_extract_triplets.py —— DeepSeek 驱动的三元组 (实体/关系) 抽取。
-
-python 3_import_graph.py —— 将 JSON 三元组写入 Neo4j。
-
-python 4_community_detection.py —— 运行 Leiden 算法进行社区划分。
-
-python 5_generate_summaries.py —— 为子图社区生成自然语言摘要。
-
-python 6_build_vector_index.py —— 构建 FAISS 本地向量库 (BGE-Small)。
-
-阶段二：应用启动 (Run Application)
-启动基于 Streamlit 构建的可视化审查面板：
-
-Bash
-streamlit run app.py
-阶段三：核心算法与高级特性验证 (Advanced Capabilities)
-独立运行以下脚本，深入体验 FinSight 的底层算法优势：
-
-实体对齐: python 9_entity_resolution.py (清洗并合并图谱中的同义实体)。
-
-自动化评测: python 10_evaluate.py (运行 FinBench 测试集，验证召回率提升)。
-
-Reranker 去噪: python 11_rerank.py (观察 Cross-Encoder 如何精准过滤无关文档)。
-
-增量入库: python 12_incremental_update.py (模拟新知识入库时的锚点挂载与局部摘要刷新)。
-
-自反思流: python 13_agent_feedback_loop.py (体验 Agent 发现证据不足时自动 Rewrite Query 的过程)。
-
-模型蒸馏: python 14_distillation_pipeline.py (对比 Zero-Shot 与 Teacher-Student 蒸馏后的抽取表现)。
-
-📄 技术架构图 (Architecture)
-代码段
+```mermaid
 graph TD
-    A[PDF 招股书/合同] -->|PyPDF & TikToken| B(文本切片 Chunks)
+    A[Phase 1: Isaac Lab 并行仿真] -->|State & Action| B(Raw Trajectories);
+    B --> C[Phase 2: GPT-4o 视觉思维链生成];
+    C -->|Visual Desc + Reasoning + Intent| D(Annotated Dataset);
+    D -->|Frame Stacking & Normalization| E[Phase 3: 多任务蒸馏训练];
+    E -->|Visual-CoT Policy| F[Phase 4: 边缘端部署];
+    F -->|Action Chunking| G[Temporal Ensembling 时序融合];
+    G -->|30Hz Smooth Control| H((Real Robot / Sim))
     
-    %% 索引构建层
-    subgraph Indexing Pipeline
-        B -->|Embedding| C[FAISS 向量库]
-        B -->|LLM Extraction| D[实体与关系提取]
-        D -->|Cypher| E[Neo4j 知识图谱]
-        E -->|Leiden Algorithm| F[社区聚类检测]
-        F -->|LLM Summarization| G[社区宏观摘要]
-    end
-
-    %% 推理层
-    subgraph Agentic Reasoning Workflow
-        User[用户提问] --> H[Hybrid Search 混合检索]
-        H -->|Vector Search| C
-        H -->|Graph Traversal| E
-        H -->|Macro Context| G
-        
-        C & E & G --> I[BGE-Reranker 交叉编码打分]
-        I --> J{裁判模型评估 Grade}
-        J -->|Evidence Insufficient| K[Query Rewrite 检索词重写]
-        K --> H
-        J -->|Evidence Sufficient| L[DeepSeek 生成最终回答]
-    end
-📜 License
-MIT License
+    style A fill:#d4f1f4,stroke:#333
+    style C fill:#f4e7d4,stroke:#333
+    style E fill:#d4f4d7,stroke:#333
+    style G fill:#f3d4f4,stroke:#333
+▶️ 快速开始 (Quick Start)1. 数据采集 (Data Collection)在 Isaac Lab 仿真环境中并行采集机械臂操控数据。Bash# 启动 headless 模式进行高速并行采集
+python 01_collect_data.py
+2. 生成思维链标注 (CoT Generation)调用 GPT-4o Vision 接口，为原始轨迹自动打上意图（Intent）和推理过程（Reasoning Trace）标签。Bash# 请确保已设置环境变量: export OPENAI_API_KEY="sk-..."
+python 02_generate_cot.py
+3. 策略网络训练 (Policy Training)利用 Frame Stacking 和 Action Chunking 机制，训练多任务轻量级策略网络。内置数据归一化与验证集监控。Bashpython 03_train_policy.py
+4. 实时融合推理 (Real-time Ensembling Inference)模拟真实部署环境，通过 ActionEnsembler 验证多步预测的加权平滑效果。Bashpython 04_inference_ensembling.py
+📊 性能表现 (Performance Metrics)指标 (Metric)结果 (Value)备注 (Note)仿真吞吐量 (Sim Speed)90k+ FPS基于 RTX 5080 (4096 Envs)端侧控制频率 (Control Freq)30 Hz+纯视觉输入下的稳定闭环推理延迟 (Inference Latency)< 10 ms相比 7B VLA 模型降低 95% 以上动作预测视野 (Chunk Size)20 Steps覆盖约 0.67 秒的未来动作规划👤 作者 (Author)Jiale Qian (钱家乐)Email: 12011626@mail.sustech.edu.cnGithub: qjl1104Institution: Southern University of Science and Technology (SUSTech)📝 许可证 (License)本项目基于 MIT License 开源。
