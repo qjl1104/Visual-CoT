@@ -1,0 +1,87 @@
+import torch
+import numpy as np
+from collections import deque
+from torchvision import transforms
+from PIL import Image
+
+class ActionEnsembler:
+    def __init__(self, chunk_size=20, action_dim=8, device="cuda"):
+        """
+        【工业级优化 3】：时序融合 (Temporal Ensembling)
+        管理 Action Chunking 产生的重叠预测序列
+        """
+        self.chunk_size = chunk_size
+        self.action_dim = action_dim
+        self.device = device
+        
+        # 动作缓存队列：存储过去 chunk_size 步的预测序列
+        self.action_history = deque(maxlen=chunk_size)
+        
+        # 生成指数衰减权重：越近的预测权重越高 (比如刚预测出的当前步最准)
+        # exp_weights 形状: [chunk_size], 值类似于 [0.01, 0.05, ..., 1.0]
+        self.exp_weights = torch.exp(-0.25 * torch.arange(chunk_size, 0, -1, dtype=torch.float32)).to(device)
+
+    def update_and_get_action(self, new_chunk_pred):
+        """
+        传入当前时刻模型预测的 chunk [chunk_size, action_dim]
+        返回融合后的当前最佳单步动作
+        """
+        self.action_history.append(new_chunk_pred.detach())
+        
+        num_valid_chunks = len(self.action_history)
+        # 提取各个历史序列对“当前这一物理时刻”的预测值
+        # 比如：当前时刻是 t。
+        # 上一步(t-1)预测的 chunk 中的第 1 个动作，指向 t
+        # 上两步(t-2)预测的 chunk 中的第 2 个动作，指向 t
+        
+        current_step_preds = []
+        valid_weights = []
+        
+        for i, chunk in enumerate(reversed(self.action_history)):
+            # chunk 是在 t-i 时刻预测的序列，它包含未来 chunk_size 步
+            # 只有当 i < chunk_size 时，它才包含了对时刻 t 的预测
+            if i < self.chunk_size:
+                current_step_preds.append(chunk[i])
+                valid_weights.append(self.exp_weights[-1 - i]) # 获取对应的衰减权重
+        
+        # 堆叠所有对当前时刻的预测
+        preds_tensor = torch.stack(current_step_preds) # [N, action_dim]
+        weights_tensor = torch.tensor(valid_weights, device=self.device).unsqueeze(1) # [N, 1]
+        
+        # 加权平均融合
+        weights_sum = weights_tensor.sum()
+        fused_action = (preds_tensor * weights_tensor).sum(dim=0) / weights_sum
+        
+        return fused_action
+
+# --- 模拟真实部署环境 ---
+def deploy_mock():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Initializing Temporal Ensembling Inference Engine...")
+    
+    # 1. 加载归一化参数 (必须与训练时一致)
+    norm_stats = torch.load('norm_stats.pth')
+    action_min = norm_stats['action_min'].to(device)
+    action_scale = norm_stats['action_scale'].to(device)
+    
+    # 2. 初始化融合器
+    ensembler = ActionEnsembler(chunk_size=20, action_dim=8, device=device)
+    
+    # 模拟在 Isaac Lab 或真实机械臂控制循环中运行
+    print("Starting Control Loop (Simulated 30Hz)...")
+    for step in range(50):
+        # 模拟模型输出的原始预测 [20, 8] (已归一化到[-1, 1])
+        # 实际代码中这里应该是：pred_chunk, _ = model(img_stack, state)
+        mock_pred_chunk = torch.rand((20, 8), device=device) * 2 - 1 
+        
+        # 将新预测推入融合器，获取当前步最平滑的动作
+        fused_normalized_action = ensembler.update_and_get_action(mock_pred_chunk)
+        
+        # 3. 反归一化 (De-normalize)，还原为机械臂可执行的真实物理单位
+        real_action = ((fused_normalized_action + 1.0) / 2.0) * action_scale + action_min
+        
+        if step % 10 == 0:
+            print(f"Step {step:03d} | Fused Action Execute: {real_action.cpu().numpy()[:3]}...") # 仅打印前三个维度示意
+
+if __name__ == "__main__":
+    deploy_mock()
