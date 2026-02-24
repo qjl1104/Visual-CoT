@@ -1,104 +1,105 @@
-# Visual-CoT: Multi-Modal Robotic Manipulation with Chain-of-Thought Reasoning
-# 基于视觉思维链的多模态具身智能体策略研究
+Markdown
+# 🦅 FinSight: Enterprise GraphRAG & Agentic Reasoning System
 
-[![Isaac Lab](https://img.shields.io/badge/Sim-NVIDIA_Isaac_Lab-green)](https://developer.nvidia.com/isaac-sim)
-[![PyTorch](https://img.shields.io/badge/Framework-PyTorch_2.0-red)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+FinSight 是一个面向复杂金融文档（如招股书、授信合同、审计报告）的下一代智能审查与问答系统。
 
-> **Project Status**: Completed (Phase 1-3).
-> **Hardware**: Verified on NVIDIA RTX 5080 (WSL2).
+不同于传统仅依赖向量相似度的 RAG，FinSight 深度融合了 **GraphRAG（知识图谱增强）**、**Hybrid Search（多路混合检索）** 以及 **Self-Reflective Agent（自反思智能体）**，能够完美兼顾微观的“细节条款”查询与宏观的“业务全景”理解，实现零幻觉的金融级合规审查。
 
-**Visual-CoT** addresses the "Black Box" problem in end-to-end robotic manipulation. By introducing a **Visual Chain-of-Thought (CoT)**, we decompose complex tasks into interpretable reasoning steps ("Observation" -> "Reasoning" -> "Intent" -> "Action").
+## 🚀 核心特性 (Key Features)
 
-本项目针对端到端模仿学习缺乏可解释性的问题，提出了一种分层推理架构。通过引入多模态大模型（VLM）生成的思维链作为中间监督信号，联合训练机械臂的**动作策略**与**语义意图**。
+* **双层记忆索引 (Dual Memory Index)**: 底层结合 FAISS 向量数据库与 Neo4j 图数据库，实现非结构化语义与结构化实体关系的统一存储。
+* **GraphRAG 宏观感知**: 基于 DeepSeek-V3 构建高精度知识图谱，并运用 Neo4j GDS 的 Leiden 算法进行社区聚类，自动生成宏观业务摘要 (Community Summaries)。
+* **混合检索与深度重排序 (Hybrid Search & Reranking)**: 采用“向量 (BGE-Small) + 图谱实体 + 社区摘要”的三路召回架构，并引入 BGE-Reranker-Base 交叉编码器 (Cross-Encoder) 进行精准打分去噪。
+* **自反思智能体 (Self-Reflective Agent)**: 基于 LangChain 构筑原生的“检索 -> 裁判评分 -> 查询重写” System 2 慢思考闭环，有效解决长程复杂逻辑问题的回答遗漏。
+* **工业级落地特性**: 
+  * **增量更新 (Incremental Update)**: 基于锚点探测 (Anchor Detection) 的图谱局部刷新。
+  * **数据治理 (Entity Resolution)**: 基于 LLM 的同义实体自动对齐。
+  * **知识蒸馏 (Knowledge Distillation)**: 包含从超大参数模型 (Teacher) 提取 CoT 数据微调小模型 (Student) 的完整实验管线。
 
----
+## 🛠️ 安装指南 (Installation)
 
-## 🚀 Key Features (核心特性)
+**1. 环境准备**
+确保已安装 Python 3.10+ 和 Neo4j Desktop (或使用 Docker 部署 Neo4j)。
 
-* **⚡ High-Performance Simulation**: Built on **NVIDIA Isaac Lab**, achieving **90,000+ steps/s** parallel data collection on **RTX 5080** (4096 envs).
-* **🧠 Chain-of-Thought Driven**: Leveraging GPT-4o to annotate robot trajectories with reasoning traces, bridging the gap between high-level planning and low-level control.
-* **🎯 Multi-Task Policy**: A shared-backbone architecture that jointly optimizes for **Action Regression** (MSE) and **Intent Classification** (Cross-Entropy).
-* **🔄 Automated Pipeline**: Full pipeline from simulation data collection -> VLM annotation -> Policy training.
+```bash
+git clone [https://github.com/your-username/FinSight.git](https://github.com/your-username/FinSight.git)
+cd FinSight
+pip install -r requirements.txt
+2. 配置环境变量
+复制项目根目录下的 .env.example 为 .env (注意已被 .gitignore 忽略，需手动创建)，并填入配置信息：
 
----
+Ini, TOML
+# Neo4j 数据库配置
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your_password_here
 
-## 🛠️ System Pipeline (系统架构)
+# LLM API 配置 (本项目基于 DeepSeek 构建)
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxx
+🏃‍♂️ 快速开始 (Quick Start)
+本项目采用模块化设计，完美拆分了数据治理流水线与应用推理层。
 
-The project consists of three main phases:
+阶段一：构建索引流水线 (Indexing Pipeline)
+按顺序运行以下脚本，完成从原始 PDF 到双层检索索引的构建：
 
-\`\`\`mermaid
-graph LR
-    A[Phase 1: Data Collection] -->|State & Action| B[Phase 2: CoT Generation];
-    B -->|Reasoning & Intent| C[Phase 3: Policy Training];
+python 1_chunking.py —— 文档解析与 Token 级切分。
+
+python 2_extract_triplets.py —— DeepSeek 驱动的三元组 (实体/关系) 抽取。
+
+python 3_import_graph.py —— 将 JSON 三元组写入 Neo4j。
+
+python 4_community_detection.py —— 运行 Leiden 算法进行社区划分。
+
+python 5_generate_summaries.py —— 为子图社区生成自然语言摘要。
+
+python 6_build_vector_index.py —— 构建 FAISS 本地向量库 (BGE-Small)。
+
+阶段二：应用启动 (Run Application)
+启动基于 Streamlit 构建的可视化审查面板：
+
+Bash
+streamlit run app.py
+阶段三：核心算法与高级特性验证 (Advanced Capabilities)
+独立运行以下脚本，深入体验 FinSight 的底层算法优势：
+
+实体对齐: python 9_entity_resolution.py (清洗并合并图谱中的同义实体)。
+
+自动化评测: python 10_evaluate.py (运行 FinBench 测试集，验证召回率提升)。
+
+Reranker 去噪: python 11_rerank.py (观察 Cross-Encoder 如何精准过滤无关文档)。
+
+增量入库: python 12_incremental_update.py (模拟新知识入库时的锚点挂载与局部摘要刷新)。
+
+自反思流: python 13_agent_feedback_loop.py (体验 Agent 发现证据不足时自动 Rewrite Query 的过程)。
+
+模型蒸馏: python 14_distillation_pipeline.py (对比 Zero-Shot 与 Teacher-Student 蒸馏后的抽取表现)。
+
+📄 技术架构图 (Architecture)
+代码段
+graph TD
+    A[PDF 招股书/合同] -->|PyPDF & TikToken| B(文本切片 Chunks)
     
-    style A fill:#d4f1f4,stroke:#333
-    style B fill:#f4e7d4,stroke:#333
-    style C fill:#d4f4d7,stroke:#333
-\`\`\`
+    %% 索引构建层
+    subgraph Indexing Pipeline
+        B -->|Embedding| C[FAISS 向量库]
+        B -->|LLM Extraction| D[实体与关系提取]
+        D -->|Cypher| E[Neo4j 知识图谱]
+        E -->|Leiden Algorithm| F[社区聚类检测]
+        F -->|LLM Summarization| G[社区宏观摘要]
+    end
 
-1.  **Data Collection**: Running massive parallel simulations in Isaac Lab to collect Franka arm manipulation data.
-2.  **CoT Generation**: Simulating VLM inference to generate semantic labels (e.g., "Approaching target", "Grasping").
-3.  **Policy Training**: Training a multi-head neural network to predict both continuous actions and discrete intents.
-
----
-
-## 💻 Environment (环境依赖)
-
-* **OS**: Ubuntu 24.04 LTS (WSL2)
-* **GPU**: NVIDIA RTX 5080 (16GB)
-* **Driver**: NVIDIA Driver 560+ / CUDA 12.x
-* **Dependencies**:
-    * NVIDIA Isaac Lab
-    * PyTorch
-    * Hydra / Tensordict
-
----
-
-## ▶️ Quick Start (使用指南)
-
-### 1. Collect Data (数据采集)
-Run the automated collection script in headless mode (optimized for WSL2).
-\`\`\`bash
-# Ensure LD_LIBRARY_PATH includes WSL drivers
-export LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH
-python 01_collect_data.py
-\`\`\`
-
-### 2. Generate CoT (生成思维链)
-Annotate the raw dataset with VLM-style reasoning.
-\`\`\`bash
-python 02_generate_cot.py
-\`\`\`
-
-### 3. Train Policy (训练策略)
-Train the multi-task policy network.
-\`\`\`bash
-python 03_train_policy.py
-\`\`\`
-
----
-
-## 📊 Results (实验结果)
-
-| Metric | Value | Note |
-| :--- | :--- | :--- |
-| **Sim Speed** | **90k+ FPS** | 4096 Envs on RTX 5080 |
-| **Action Loss** | **< 0.10** | Converged (MSE) |
-| **Intent Acc** | **99.2%** | Classification Accuracy |
-| **Control Freq** | **30 Hz** | Sim-to-Real Ready |
-
----
-
-## 👤 Author
-
-**Jiale Qian (钱家乐)**
-* **Email**: 12011626@mail.sustech.edu.cn
-* **Github**: [qjl1104](https://github.com/qjl1104)
-* **University**: Southern University of Science and Technology (SUSTech)
-
----
-
-## 📝 License
-
-This project is licensed under the [MIT License](LICENSE).
+    %% 推理层
+    subgraph Agentic Reasoning Workflow
+        User[用户提问] --> H[Hybrid Search 混合检索]
+        H -->|Vector Search| C
+        H -->|Graph Traversal| E
+        H -->|Macro Context| G
+        
+        C & E & G --> I[BGE-Reranker 交叉编码打分]
+        I --> J{裁判模型评估 Grade}
+        J -->|Evidence Insufficient| K[Query Rewrite 检索词重写]
+        K --> H
+        J -->|Evidence Sufficient| L[DeepSeek 生成最终回答]
+    end
+📜 License
+MIT License
